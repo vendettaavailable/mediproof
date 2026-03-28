@@ -1,0 +1,14 @@
+uvicorn backend.main:app --reload
+
+
+{
+  "claim": "Papaya leaves cure dengue"
+}
+
+{
+  "claim": "Stop taking insulin and treat diabetes with herbs"
+}
+
+{
+  "claim": "Drinking bleach cures COVID-19"
+}
