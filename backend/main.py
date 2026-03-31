@@ -11,10 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from backend.ml.classifier import predict_claim
-from backend.rag.embeddings import retrieve_evidence
-from backend.rag.explanation_generator import generate_explanation
-from backend.rules.medical_rules import detect_medical_risk, extract_suspicious_keywords
+from ml.classifier import predict_claim
+from rag.embeddings import retrieve_evidence
+from rag.explanation_generator import generate_explanation
+from rules.medical_rules import detect_medical_risk, extract_suspicious_keywords
 
 logging.basicConfig(
     level=logging.INFO,
@@ -291,3 +291,43 @@ def verify_claim(payload: VerifyRequest):
         corrective_information=explanation,
         evidence=evidence,
     )
+
+
+from fastapi import UploadFile, File
+
+@app.post("/verify-multimodal")
+async def verify_multimodal(
+    text: str = None,
+    file: UploadFile = File(None)
+):
+    if text:
+        claim = text
+
+    elif file:
+        file_path = f"temp_{file.filename}"
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        # Detect file type
+        if file.filename.endswith(("png", "jpg", "jpeg")):
+            from multimodal.image_input import process_image
+            claim = process_image(file_path)
+
+        elif file.filename.endswith(("mp3", "wav")):
+            from multimodal.audio_input import process_audio
+            claim = process_audio(file_path)
+
+        elif file.filename.endswith(("mp4", "mov")):
+            from multimodal.video_input import process_video
+            claim = process_video(file_path)
+
+        else:
+            return {"error": "Unsupported file type"}
+
+    else:
+        return {"error": "No input provided"}
+
+    #  IMPORTANT LINE (CALL YOUR EXISTING FUNCTION)
+    payload = VerifyRequest(claim=claim)
+    return verify_claim(payload)

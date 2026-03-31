@@ -8,7 +8,7 @@ The MediProof classifier now includes LIME (Local Interpretable Model-agnostic E
 ### Basic Usage
 
 ```python
-from backend.ml.classifier import predict_claim, explain_prediction
+from ml.classifier import predict_claim, explain_prediction
 
 # Make a prediction
 claim = "Papaya cures dengue fever completely"
@@ -101,8 +101,8 @@ The LIME explainability works with:
 To add explanations to the `/verify` endpoint:
 
 ```python
-from backend.main import verify_claim
-from backend.ml.classifier import explain_prediction
+from main import verify_claim
+from ml.classifier import explain_prediction
 
 response = verify_claim(request)
 explanation = explain_prediction(request.claim)

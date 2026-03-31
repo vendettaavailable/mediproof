@@ -16,7 +16,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from lime.lime_text import LimeTextExplainer
-from backend.ml.dataset_loader import load_misinformation_datasets
+from ml.dataset_loader import load_misinformation_datasets
 
 df = load_misinformation_datasets()
 print(df.head())
@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-from backend.ml.dataset_loader import load_misinformation_datasets
+from ml.dataset_loader import load_misinformation_datasets
 
 logger = logging.getLogger(__name__)
  
