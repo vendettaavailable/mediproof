@@ -4,7 +4,7 @@ Quick verification script for LIME explainability in MediProof classifier.
 Tests that all required functions exist and are properly structured.
 """
 
-from backend.ml.classifier import (
+from ml.classifier import (
     predict_claim,
     explain_prediction,
     _get_explainer,
@@ -45,7 +45,7 @@ print("  - Logging of explanation generation\n")
 
 print("✓ LIME integration complete and ready for use!")
 print("\nUsage example:")
-print("  from backend.ml.classifier import predict_claim, explain_prediction")
+print("  from ml.classifier import predict_claim, explain_prediction")
 print("  pred = predict_claim('Papaya cures dengue')")
 print("  expl = explain_prediction('Papaya cures dengue')")
 print("  print(expl['important_words'])")

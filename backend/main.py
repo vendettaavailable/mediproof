@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
+from email.mime import text
 import html
 import logging
 import time
 import re
 from typing import List, Literal
 
+from multimodal.claim_extractor_llm import extract_claim_llm
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -309,18 +314,16 @@ async def verify_multimodal(
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        # Detect file type
         if file.filename.endswith(("png", "jpg", "jpeg")):
             from multimodal.image_input import process_image
             claim = process_image(file_path)
 
         elif file.filename.endswith(("mp3", "wav")):
             from multimodal.audio_input import process_audio
-            claim = process_audio(file_path)
+            from multimodal.claim_extractor_llm import extract_claim_llm
 
-        elif file.filename.endswith(("mp4", "mov")):
-            from multimodal.video_input import process_video
-            claim = process_video(file_path)
+            text = process_audio(file_path)
+            claim = extract_claim_llm(text)
 
         else:
             return {"error": "Unsupported file type"}
@@ -328,6 +331,5 @@ async def verify_multimodal(
     else:
         return {"error": "No input provided"}
 
-    #  IMPORTANT LINE (CALL YOUR EXISTING FUNCTION)
     payload = VerifyRequest(claim=claim)
     return verify_claim(payload)
