@@ -5,6 +5,7 @@ try:
 except ImportError:
     Groq = None
 
+# ✅ Correct: use variable name, not actual key
 API_KEY = os.getenv("GROQ_API_KEY")
 
 # Load client once globally
@@ -24,23 +25,12 @@ Rules:
 
 
 def extract_claim_llm(text):
-    """
-    Extract the main medical claim from noisy text using Groq.
-
-    Args:
-        text: Input text from OCR, Whisper, or other multimodal sources.
-
-    Returns:
-        Clean claim text as a single sentence, or an empty string on failure.
-    """
     original_text = (text or "").strip()
 
     if not original_text:
-        print("Groq fallback: input text is empty, returning placeholder text.")
         return "No claim found"
 
     if client is None:
-        print("Groq fallback: client is not available, returning original text.")
         return original_text
 
     try:
@@ -56,10 +46,9 @@ def extract_claim_llm(text):
         claim = response.choices[0].message.content.strip()
 
         if len(claim) < 3:
-            print("Groq fallback: empty or too-short LLM output, returning original text.")
             return original_text
 
         return claim
-    except Exception as exc:
-        print(f"Groq fallback: request failed ({exc}), returning original text.")
+
+    except Exception:
         return original_text

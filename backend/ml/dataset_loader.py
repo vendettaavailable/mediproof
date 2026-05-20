@@ -13,6 +13,27 @@ TARGET_COLUMNS = ["claim", "label"]
 VALID_LABELS = {"True", "False", "Misleading"}
 MEDIPROOF_TEXT_COLUMNS = ("text", "title", "claim", "content", "headline")
 
+SAMPLE_MEDICAL_ROWS: List[Dict[str, str]] = [
+	{"claim": "wearing masks can help reduce the spread of covid-19", "label": "True"},
+	{"claim": "covid-19 vaccines are safe and help prevent severe disease", "label": "True"},
+	{"claim": "regular hand washing helps reduce the spread of infectious diseases", "label": "True"},
+	{"claim": "antibiotics do not treat viral infections such as the common cold", "label": "True"},
+	{"claim": "exercise can reduce the risk of cardiovascular disease", "label": "True"},
+	{"claim": "insulin is required for people with type 1 diabetes", "label": "True"},
+	{"claim": "bleach can cure covid-19", "label": "False"},
+	{"claim": "5g spreads covid-19", "label": "False"},
+	{"claim": "vaccines contain microchips for tracking people", "label": "False"},
+	{"claim": "garlic can permanently cure diabetes", "label": "False"},
+	{"claim": "masks cause dangerous oxygen deprivation in healthy people", "label": "False"},
+	{"claim": "cancer can be cured completely with herbal remedies alone", "label": "False"},
+	{"claim": "vitamin c supports immunity but does not cure flu", "label": "Misleading"},
+	{"claim": "a healthy diet supports health but cannot replace all prescribed medication", "label": "Misleading"},
+	{"claim": "natural remedies may help mild symptoms but cannot cure serious diseases", "label": "Misleading"},
+	{"claim": "supplements can help some people but megadoses are not proven cures", "label": "Misleading"},
+	{"claim": "fasting may help weight management but is not safe for everyone", "label": "Misleading"},
+	{"claim": "organic food may reduce some exposures but does not eliminate all health risks", "label": "Misleading"},
+]
+
 _LINK_PATTERN = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _SPACE_PATTERN = re.compile(r"\s+")
 
@@ -273,6 +294,21 @@ def load_mediproof_dataset(datasets_root: Optional[str] = None) -> pd.DataFrame:
 	return result[TARGET_COLUMNS]
 
 
+def build_sample_medical_dataset(random_state: int = 42) -> pd.DataFrame:
+	"""
+	Return a small built-in fallback dataset when no external dataset is available.
+	"""
+	frame = pd.DataFrame(SAMPLE_MEDICAL_ROWS, columns=TARGET_COLUMNS)
+	frame["claim"] = frame["claim"].astype(str).map(_clean_claim_text)
+	frame["label"] = frame["label"].astype(str).map(_canonicalize_label)
+	frame = frame.dropna(subset=["claim", "label"])
+	frame = frame[frame["claim"].str.len() > 0]
+	frame = frame[frame["label"].isin(VALID_LABELS)]
+	frame = frame.drop_duplicates(subset=["claim"]).reset_index(drop=True)
+	frame = shuffle(frame, random_state=random_state).reset_index(drop=True)
+	return frame[TARGET_COLUMNS]
+
+
 def load_misinformation_datasets(file_paths: Optional[List[str]] = None, random_state: int = 42) -> pd.DataFrame:
 	"""
 	Load, normalize, and merge medical misinformation datasets.
@@ -288,7 +324,11 @@ def load_misinformation_datasets(file_paths: Optional[List[str]] = None, random_
 		pandas.DataFrame with columns: claim, label.
 	"""
 	if not file_paths:
-		return load_mediproof_dataset()
+		frame = load_mediproof_dataset()
+		if frame.empty:
+			frame = build_sample_medical_dataset(random_state=random_state)
+		print("Dataset size:", len(frame))
+		return frame
 
 	merged_records: List[Dict[str, str]] = []
 
@@ -299,7 +339,9 @@ def load_misinformation_datasets(file_paths: Optional[List[str]] = None, random_
 		merged_records.extend(_load_file_records(path))
 
 	if not merged_records:
-		return pd.DataFrame(columns=TARGET_COLUMNS)
+		frame = build_sample_medical_dataset(random_state=random_state)
+		print("Dataset size:", len(frame))
+		return frame
 
 	frame = pd.DataFrame(merged_records, columns=TARGET_COLUMNS)
 
@@ -313,8 +355,12 @@ def load_misinformation_datasets(file_paths: Optional[List[str]] = None, random_
 	frame = frame.drop_duplicates(subset=["claim"]).reset_index(drop=True)
 	frame = shuffle(frame, random_state=random_state).reset_index(drop=True)
 
+	if frame.empty:
+		frame = build_sample_medical_dataset(random_state=random_state)
+
+	print("Dataset size:", len(frame))
 	return frame[TARGET_COLUMNS]
 
 
-__all__ = ["load_misinformation_datasets", "load_mediproof_dataset"]
+__all__ = ["load_misinformation_datasets", "load_mediproof_dataset", "build_sample_medical_dataset"]
 

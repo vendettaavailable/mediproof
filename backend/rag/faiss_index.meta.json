@@ -1,6 +1,6 @@
 {
-  "model_name": "sentence-transformers/all-MiniLM-L6-v2",
-  "document_count": 928,
-  "document_signature": "37f7129db61ac4041a3f9aefeb5618a8cf63da297ec7c8b5e3db6d041c942ab7",
+  "model_name": "all-MiniLM-L6-v2",
+  "document_count": 14,
+  "document_signature": "f136376d53a1059874c3fb371c518dab131ecb4c5559c7a58a0c4b17c8672868",
   "embedding_dimension": 384
 }

@@ -3,15 +3,15 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
-from email.mime import text
 import html
 import logging
 import time
 import re
-from typing import List, Literal
+from pathlib import Path
+from typing import List, Literal, Optional
 
 from multimodal.claim_extractor_llm import extract_claim_llm
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -44,14 +44,22 @@ app.add_middleware(
 
 MAX_CLAIM_LENGTH = 2000
 EVIDENCE_TOP_K = 5
-LOW_CONFIDENCE_THRESHOLD = 0.4
-STRONG_EVIDENCE_SCORE_THRESHOLD = 0.4
+LOW_CONFIDENCE_THRESHOLD = 0.25
+STRONG_EVIDENCE_SCORE_THRESHOLD = 0.3
+UPLOAD_DIR = Path("uploads")
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav"}
+SUPPORTED_FILE_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_AUDIO_EXTENSIONS
 
 CURE_KEYWORDS = ("cure", "completely cure", "permanent cure", "cures")
 CONTRADICTION_PHRASES = (
     "does not cure", "no evidence", "not effective",
     "cannot cure", "no scientific evidence", "not supported",
     "no cure", "scientifically unfounded", "misinformation",
+)
+SUPPORT_PHRASES = (
+    "effective", "recommended", "reduces the risk",
+    "supports", "proven", "approved", "undergo rigorous clinical trials",
 )
 
 
@@ -83,6 +91,13 @@ class VerifyResponse(BaseModel):
     suspicious_keywords: List[str]
     corrective_information: str
     evidence: List[EvidenceItem]
+
+
+try:
+    import multipart  # type: ignore # noqa: F401
+    MULTIPART_INSTALLED = True
+except ImportError:
+    MULTIPART_INSTALLED = False
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +143,7 @@ def _get_ml_classification(claim: str) -> tuple[str, float]:
         result = predict_claim(claim)
         verdict = result.get("label", "Uncertain")
         confidence = float(result.get("confidence", 0.0))
+        print("ML prediction:", {"label": verdict, "confidence": confidence})
         return verdict, confidence
     except Exception as exc:
         logger.error("ML classification failed: %s", exc)
@@ -159,7 +175,7 @@ def _get_evidence(claim: str, top_k: int = EVIDENCE_TOP_K) -> List[EvidenceItem]
     """
     try:
         raw_evidence = retrieve_evidence(claim, top_k=top_k)
-        return [
+        evidence_items = [
             EvidenceItem(
                 content=e.get("content", ""),
                 source=e.get("source", "Unknown"),
@@ -168,9 +184,21 @@ def _get_evidence(claim: str, top_k: int = EVIDENCE_TOP_K) -> List[EvidenceItem]
             )
             for e in raw_evidence
         ]
+        print("Retrieved evidence:", [item.model_dump() for item in evidence_items])
+        return evidence_items
     except Exception as exc:
         logger.error("Evidence retrieval failed: %s", exc)
-        return []
+        fallback_item = EvidenceItem(
+            content=(
+                "Trusted medical guidance should come from reliable public health sources such as WHO, CDC, or NHS. "
+                "Evidence retrieval is temporarily unavailable, so this claim should be verified carefully."
+            ),
+            source="MediProof Fallback Guidance",
+            url="",
+            score=0.1,
+        )
+        print("Retrieved evidence:", [fallback_item.model_dump()])
+        return [fallback_item]
 
 
 def _evidence_contradicts_cure_claim(claim: str, evidence: List[EvidenceItem]) -> bool:
@@ -190,6 +218,28 @@ def _evidence_contradicts_cure_claim(claim: str, evidence: List[EvidenceItem]) -
     return has_contradiction
 
 
+def _evidence_contradicts_claim(evidence: List[EvidenceItem]) -> bool:
+    """
+    Check whether the top evidence contains contradiction language.
+    """
+    if not evidence:
+        return False
+
+    top_evidence_text = evidence[0].content.lower()
+    return any(phrase in top_evidence_text for phrase in CONTRADICTION_PHRASES)
+
+
+def _evidence_supports_claim(evidence: List[EvidenceItem]) -> bool:
+    """
+    Check whether the top evidence contains supportive language.
+    """
+    if not evidence:
+        return False
+
+    top_evidence_text = evidence[0].content.lower()
+    return any(phrase in top_evidence_text for phrase in SUPPORT_PHRASES)
+
+
 def _combine_verdict(
     claim: str,
     ml_verdict: str,
@@ -203,13 +253,17 @@ def _combine_verdict(
     Priority rules:
     1) If risk_level is High => Misleading
     2) If evidence contradicts cure claim => Misleading
-    3) If top evidence score > 0.4 and risk_level is Low => True
-    4) If ML confidence < 0.4 and no strong evidence => Uncertain
-    5) Otherwise => ML prediction
+    3) If strong contradiction evidence exists => False
+    4) If strong support evidence exists and risk_level is Low => True
+    5) If risk_level is Medium => Misleading
+    6) If ML has a usable label => ML prediction
+    7) Otherwise => Uncertain
     """
     normalized_ml = ml_verdict if ml_verdict in {"True", "False", "Misleading", "Uncertain"} else "Uncertain"
     top_score = evidence[0].score if evidence else 0.0
     has_strong_evidence = top_score > STRONG_EVIDENCE_SCORE_THRESHOLD
+    contradiction_detected = _evidence_contradicts_claim(evidence)
+    support_detected = _evidence_supports_claim(evidence)
 
     if risk_level == "High":
         return "Misleading"
@@ -217,13 +271,66 @@ def _combine_verdict(
     if _evidence_contradicts_cure_claim(claim, evidence):
         return "Misleading"
 
-    if has_strong_evidence and risk_level == "Low":
+    if has_strong_evidence and contradiction_detected:
+        return "False"
+
+    if has_strong_evidence and support_detected and risk_level == "Low":
         return "True"
 
-    if ml_confidence < LOW_CONFIDENCE_THRESHOLD and not has_strong_evidence:
-        return "Uncertain"
+    if risk_level == "Medium":
+        return "Misleading"
 
-    return normalized_ml
+    if normalized_ml != "Uncertain" and ml_confidence >= LOW_CONFIDENCE_THRESHOLD:
+        return normalized_ml
+
+    if normalized_ml in {"False", "Misleading"} and contradiction_detected:
+        return normalized_ml
+
+    if normalized_ml == "True" and support_detected:
+        return "True"
+
+    return "Uncertain"
+
+
+def _save_uploaded_file(file: UploadFile, content: bytes) -> Path:
+    """
+    Save the uploaded file to a local uploads folder.
+    """
+    UPLOAD_DIR.mkdir(exist_ok=True)
+    safe_name = Path(file.filename or "uploaded_file").name
+    file_path = UPLOAD_DIR / safe_name
+
+    with open(file_path, "wb") as buffer:
+        buffer.write(content)
+
+    return file_path
+
+
+def _extract_claim_from_file(file_path: Path) -> tuple[str, str]:
+    """
+    Process an image or audio file and return:
+    (extracted_text, final_claim)
+    """
+    suffix = file_path.suffix.lower()
+
+    if suffix in SUPPORTED_IMAGE_EXTENSIONS:
+        from multimodal.image_input import process_image
+
+        extracted_text = process_image(str(file_path))
+    elif suffix in SUPPORTED_AUDIO_EXTENSIONS:
+        from multimodal.audio_input import process_audio
+
+        extracted_text = process_audio(str(file_path))
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Please upload PNG, JPG, JPEG, MP3, or WAV.",
+        )
+
+    cleaned_claim = extract_claim_llm(extracted_text)
+    final_claim = (cleaned_claim or extracted_text or "").strip()
+
+    return extracted_text.strip(), final_claim
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +353,7 @@ def verify_claim(payload: VerifyRequest):
     start = time.perf_counter()
     
     claim = payload.claim
+    print("Claim received:", claim)
     logger.info("Processing claim: %s", claim)
     
     # Step 1: ML Classification
@@ -284,6 +392,7 @@ def verify_claim(payload: VerifyRequest):
         "Verification complete: ml_verdict=%s, final_verdict=%s, confidence=%.2f, risk=%s, time=%.2fs",
         ml_label, final_verdict, ml_confidence, risk_level, elapsed,
     )
+    print("Final verdict:", final_verdict)
 
     return VerifyResponse(
         claim=claim,
@@ -298,38 +407,77 @@ def verify_claim(payload: VerifyRequest):
     )
 
 
-from fastapi import UploadFile, File
+@app.post("/verify-text")
+async def verify_text_input(
+    text: str = Form(
+        ...,
+        description="Enter a plain text health claim to verify.",
+    ),
+):
+    cleaned_text = (text or "").strip()
+
+    if not cleaned_text:
+        raise HTTPException(status_code=400, detail="No text provided.")
+
+    print("Extracted text:", cleaned_text)
+    print("Final claim:", cleaned_text)
+
+    payload = VerifyRequest(claim=cleaned_text)
+    verification = verify_claim(payload)
+
+    return {
+        "extracted_text": cleaned_text,
+        "final_claim": cleaned_text,
+        "verification": verification.model_dump(),
+    }
+
 
 @app.post("/verify-multimodal")
 async def verify_multimodal(
-    text: str = None,
-    file: UploadFile = File(None)
+    file: UploadFile = File(
+        ...,
+        description="Choose an image or audio file containing a health claim.",
+    ),
 ):
-    if text:
-        claim = text
+    if not MULTIPART_INSTALLED:
+        raise HTTPException(
+            status_code=500,
+            detail="File upload support is missing. Install it with: pip install python-multipart",
+        )
 
-    elif file:
-        file_path = f"temp_{file.filename}"
+    if file is None or not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
 
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
+    extension = Path(file.filename).suffix.lower()
+    if extension not in SUPPORTED_FILE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Please upload PNG, JPG, JPEG, MP3, or WAV.",
+        )
 
-        if file.filename.endswith(("png", "jpg", "jpeg")):
-            from multimodal.image_input import process_image
-            claim = process_image(file_path)
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        elif file.filename.endswith(("mp3", "wav")):
-            from multimodal.audio_input import process_audio
-            from multimodal.claim_extractor_llm import extract_claim_llm
+    file_path = _save_uploaded_file(file, file_bytes)
+    extracted_text, claim = _extract_claim_from_file(file_path)
 
-            text = process_audio(file_path)
-            claim = extract_claim_llm(text)
+    print("Received file:", file.filename)
+    print("Extracted text:", extracted_text)
+    print("Final claim:", claim)
 
-        else:
-            return {"error": "Unsupported file type"}
-
-    else:
-        return {"error": "No input provided"}
+    if not claim or len(claim.strip()) < 3:
+        return {
+            "message": "Could not extract a clear medical claim from the uploaded file.",
+            "extracted_text": extracted_text,
+            "final_claim": "",
+        }
 
     payload = VerifyRequest(claim=claim)
-    return verify_claim(payload)
+    verification = verify_claim(payload)
+
+    return {
+        "extracted_text": extracted_text,
+        "final_claim": claim,
+        "verification": verification.model_dump(),
+    }

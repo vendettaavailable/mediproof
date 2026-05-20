@@ -22,7 +22,7 @@ KNOWLEDGE_BASE_PATH = (
 INDEX_CACHE_PATH = Path(__file__).resolve().parent / "faiss_index.bin"
 INDEX_META_PATH = Path(__file__).resolve().parent / "faiss_index.meta.json"
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = "all-MiniLM-L6-v2"
 
 DEFAULT_TOP_K = 3
 
@@ -33,6 +33,20 @@ _CONTRADICTION_PATTERNS = (
     "no evidence", "not effective", "not supported",
     "scientifically unfounded", "misinformation",
 )
+DEFAULT_FALLBACK_EVIDENCE = {
+    "content": (
+        "Trusted medical guidance should come from reliable public health sources such as WHO, CDC, or NHS. "
+        "If retrieved evidence is unavailable, treat the claim cautiously until it is verified."
+    ),
+    "source": "MediProof Fallback Guidance",
+    "url": "",
+    "score": 0.1,
+}
+TOPIC_KEYWORDS: Dict[str, tuple[str, ...]] = {
+    "covid19": ("covid", "mask", "masks", "sars-cov-2", "coronavirus", "vaccine", "vaccines", "respiratory"),
+    "general_health": ("health", "diet", "exercise", "vitamin", "vitamins", "supplement", "handwashing", "hand washing"),
+    "mental_health": ("mental", "depression", "anxiety", "stress", "therapy", "psychiatric", "psychological"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +107,81 @@ def _contains_contradiction(text: str) -> bool:
     return any(pattern in text_lower for pattern in _CONTRADICTION_PATTERNS)
 
 
+def _keyword_overlap_score(query: str, content: str) -> float:
+    query_terms = set(re.findall(r"[a-zA-Z]{4,}", query.lower()))
+    content_terms = set(re.findall(r"[a-zA-Z]{4,}", content.lower()))
+    if not query_terms or not content_terms:
+        return 0.0
+
+    overlap = len(query_terms & content_terms)
+    return overlap / max(len(query_terms), 1)
+
+
+def _detect_query_topics(query: str) -> List[str]:
+    query_lower = query.lower()
+    matched_topics: List[str] = []
+
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        if any(keyword in query_lower for keyword in keywords):
+            matched_topics.append(topic)
+
+    return matched_topics
+
+
+def _document_matches_query_topic(query: str, document: Dict[str, Any]) -> bool:
+    matched_topics = _detect_query_topics(query)
+    if not matched_topics:
+        return True
+
+    document_topic = str(document.get("topic", "")).lower()
+    content = str(document.get("content", "")).lower()
+
+    if document_topic in matched_topics:
+        return True
+
+    for topic in matched_topics:
+        keywords = TOPIC_KEYWORDS.get(topic, ())
+        if any(keyword in content for keyword in keywords):
+            return True
+
+    return False
+
+
+def _filter_documents_for_query(query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    filtered = [doc for doc in documents if _document_matches_query_topic(query, doc)]
+    return filtered if filtered else documents
+
+
+def _fallback_retrieve_evidence(query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
+    """
+    Simple keyword-based retrieval used when FAISS or sentence-transformers
+    are not available. This keeps evidence non-empty for beginner-friendly demos.
+    """
+    documents = _filter_documents_for_query(query, _load_documents())
+    if not documents:
+        return [DEFAULT_FALLBACK_EVIDENCE]
+
+    scored: List[Dict[str, Any]] = []
+    for doc in documents:
+        score = _keyword_overlap_score(query, doc.get("content", ""))
+        if score <= 0:
+            continue
+        scored.append({
+            "content": doc.get("content", ""),
+            "source": doc.get("source", "Unknown Source"),
+            "url": doc.get("url", ""),
+            "score": round(score, 4),
+        })
+
+    scored.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    results = scored[: max(1, top_k)]
+    if not results:
+        print("Retrieved docs:", [DEFAULT_FALLBACK_EVIDENCE])
+        return [DEFAULT_FALLBACK_EVIDENCE]
+    print("Retrieved docs:", results)
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Load Documents
 # ---------------------------------------------------------------------------
@@ -121,6 +210,7 @@ def _load_documents() -> List[Dict]:
             continue
 
         docs.append({
+            "topic": item.get("topic", ""),
             "content": content,
             "source": item.get("source", "Unknown Source"),
             "url": item.get("url", "")
@@ -270,8 +360,10 @@ def _get_store() -> _RAGStore:
         SentenceTransformer = _require_sentence_transformer()
 
         logger.info("Loading embedding model: %s", MODEL_NAME)
-
-        model = SentenceTransformer(MODEL_NAME)
+        try:
+            model = SentenceTransformer(MODEL_NAME, local_files_only=True)
+        except Exception:
+            model = SentenceTransformer(MODEL_NAME)
 
         documents = _load_documents()
         doc_signature = _documents_signature(documents)
@@ -299,26 +391,31 @@ def _get_store() -> _RAGStore:
 # ---------------------------------------------------------------------------
 
 def retrieve_evidence(query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
+    print("Query:", query)
 
     try:
         faiss = _require_faiss()
         import numpy as np
     except RuntimeError as exc:
         logger.error("RAG retrieval unavailable: %s", exc)
-        return []
+        fallback_results = _fallback_retrieve_evidence(query, top_k=top_k)
+        logger.info("Using fallback retrieval, results=%d", len(fallback_results))
+        return fallback_results
 
     if not isinstance(query, str) or not query.strip():
-        return []
+        return [DEFAULT_FALLBACK_EVIDENCE]
 
     try:
         store = _get_store()
     except RuntimeError as exc:
         logger.error("RAG retrieval unavailable: %s", exc)
-        return []
+        fallback_results = _fallback_retrieve_evidence(query, top_k=top_k)
+        logger.info("Using fallback retrieval, results=%d", len(fallback_results))
+        return fallback_results
 
     if store.index.ntotal == 0:
         logger.warning("FAISS index is empty")
-        return []
+        return _fallback_retrieve_evidence(query, top_k=top_k)
 
     safe_top_k = top_k if isinstance(top_k, int) and top_k > 0 else DEFAULT_TOP_K
 
@@ -342,8 +439,11 @@ def retrieve_evidence(query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
             continue
 
         doc = store.documents[idx]
+        if not _document_matches_query_topic(query, doc):
+            continue
 
         candidates.append({
+            "topic": doc.get("topic", ""),
             "content": doc["content"],
             "source": doc["source"],
             "url": doc["url"],
@@ -352,7 +452,7 @@ def retrieve_evidence(query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
 
     if not candidates:
         logger.info("Retrieved %d evidence passages", 0)
-        return []
+        return _fallback_retrieve_evidence(query, top_k=top_k)
 
     all_sentences: List[str] = []
     sentence_owner_idx: List[int] = []
@@ -408,7 +508,9 @@ def retrieve_evidence(query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
     results.sort(key=lambda item: item["score"], reverse=True)
 
     logger.info("Retrieved %d evidence passages", len(results))
-
+    print("Retrieved docs:", results)
+    if not results:
+        return _fallback_retrieve_evidence(query, top_k=top_k)
     return results
 
 
